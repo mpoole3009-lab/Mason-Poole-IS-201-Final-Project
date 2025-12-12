@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trigonometry Dash — Noir Edition</title>
+<style>
+body{margin:0;background:#050506;color:#e6e6e6;font-family:Inter,Arial,sans-serif;}
+canvas{display:block;width:100%;height:480px;}
+.hud{display:flex;justify-content:space-between;padding:10px;}
+.btn{padding:6px 12px;background:#111;border:none;border-radius:6px;color:#fff;cursor:pointer;}
+.overlay{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);text-align:center;color:#fff;}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud">
+  <div>Trigonometry Dash — Noir Edition</div>
+  <div>Score: <span id="score">0</span>
+      <button id="restart" class="btn">Restart</button>
+      <button id="mute" class="btn">Mute</button>
+  </div>
+</div>
+<div id="overlay" class="overlay" style="display:none">
+  <div id="overlay-title" style="font-size:22px;font-weight:700;margin-bottom:6px">Paused</div>
+  <div id="overlay-sub" style="margin-bottom:12px">Press Space / Click / Tap to start</div>
+  <button id="overlay-btn" class="btn">Play</button>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let DPR = window.devicePixelRatio || 1;
+
+function resizeCanvas(){
+  canvas.width = canvas.clientWidth * DPR;
+  canvas.height = 480 * DPR;
+}
+window.addEventListener('resize', () => { DPR = window.devicePixelRatio || 1; resizeCanvas(); });
+resizeCanvas();
+
+// Game config
+const CONFIG = {
+  playerSize:40,
+  groundHeight:40,
+  ceilingY:40,
+  gravity:1800,
+  jumpPower:560,
+  baseSpeed:220,
+  speedAccel:18,
+  spawnInterval:1.05,
+  spawnIntervalMin:0.5
+};
+
+let state='menu';
+let overlay = document.getElementById('overlay');
+let overlayTitle = document.getElementById('overlay-title');
+let overlaySub = document.getElementById('overlay-sub');
+let overlayBtn = document.getElementById('overlay-btn');
+let scoreEl = document.getElementById('score');
+let restartBtn = document.getElementById('restart');
+let muteBtn = document.getElementById('mute');
+let muted=false;
+
+// Player
+const player = { x:120, y:0, w:CONFIG.playerSize, h:CONFIG.playerSize, vy:0, color:'#50e3c2' };
+
+// World
+let speed=CONFIG.baseSpeed, distance=0, best=0, obstacles=[], spawnTimer=0, lastTime=performance.now();
+
+// Parallax layers
+const layers = [
+  { speedFactor:0.18, color:'#0b0b0b', buildings:[], stripHeight:[40,120], offset:0 },
+  { speedFactor:0.36, color:'#151515', buildings:[], stripHeight:[80,200], offset:0 },
+  { speedFactor:0.7, color:'#222', buildings:[], stripHeight:[120,260], offset:0 }
+];
+
+function buildParallax(){
+  const logicalW = canvas.width / DPR;
+  layers.forEach(layer => {
+    layer.buildings.length = 0;
+    let x = -200;
+    while(x < logicalW + 400){
+      const w = 80 + Math.round(Math.random()*100);
+      const h = layer.stripHeight[0] + Math.random()*(layer.stripHeight[1]-layer.stripHeight[0]);
+      layer.buildings.push({x,w,h});
+      x += w + 20;
+    }
+    layer.offset = 0;
+  });
+}
+buildParallax();
+
+function rand(a,b){ return Math.random()*(b-a)+a; }
+function rectsOverlap(a,b){ return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y; }
+
+function playBeep(freq,dur=70){
+  if(muted) return;
+  try{
+    const ac = new (window.AudioContext||window.webkitAudioContext)();
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.type='sine'; o.frequency.value=freq;
+    g.gain.value=0.02;
+    o.connect(g); g.connect(ac.destination);
+    o.start(); g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime+dur/1000);
+    setTimeout(()=>{ o.stop(); ac.close(); }, dur+20);
+  }catch(e){}
+}
+
+// Obstacles
+function spawnObstacle(){
+  const logicalW = canvas.width / DPR;
+  const groundY = canvas.height / DPR - CONFIG.groundHeight;
+  const t = Math.random(), x = logicalW + 40;
+  if(t < 0.38){
+    const h = Math.round(rand(50,150));
+    const fromBottom = Math.random()<0.5;
+    const y = fromBottom ? groundY-h : CONFIG.ceilingY;
+    obstacles.push({type:'rect', x, y, w:42, h});
+  } else if(t < 0.7){
+    const w = Math.round(rand(40,70));
+    const h = Math.round(rand(70,150));
+    const y = groundY - h;
+    obstacles.push({type:'spike', x, y, w, h});
+  } else {
+    const h = Math.round(rand(60,120));
+    const y0 = rand(CONFIG.ceilingY+20, groundY-h-20);
+    obstacles.push({type:'move', x, y:y0, baseY:y0, w:48, h, phase:Math.random()*Math.PI*2, speed:rand(1.2,2.2)});
+  }
+}
+
+// Reset / start / end
+function resetGame(){
+  obstacles.length=0; speed=CONFIG.baseSpeed; spawnTimer=0; distance=0;
+  player.y = canvas.height/DPR - CONFIG.groundHeight - player.h;
+  player.vy = 0; state='menu'; overlayTitle.textContent='Tap / Space to Start';
+  overlaySub.textContent='Avoid the noir obstacles'; overlay.style.display='block';
+  scoreEl.textContent='0'; buildParallax();
+}
+function startGame(){ if(state==='playing') return; state='playing'; overlay.style.display='none'; lastTime=performance.now(); }
+function endGame(){ state='dead'; overlayTitle.textContent='You Crashed'; overlaySub.textContent=`Score: ${Math.floor(distance/10)} — Best: ${Math.floor(best)}`; overlay.style.display='block'; best=Math.max(best,Math.floor(distance/10)); playBeep(110,200); }
+function doJump(){ if(state==='menu'||state==='paused'){startGame();return;} if(state==='dead'){resetGame();return;} player.vy=-CONFIG.jumpPower; playBeep(500,60); }
+
+// Input
+window.addEventListener('keydown', e=>{ if(e.code==='Space'){ e.preventDefault(); doJump(); } if(e.code==='KeyM'){ muted=!muted; muteBtn.textContent=muted?'Unmute':'Mute'; } });
+canvas.addEventListener('mousedown', doJump);
+canvas.addEventListener('touchstart', e=>{ e.preventDefault(); doJump(); }, {passive:false});
+overlayBtn.addEventListener('click', ()=>{ if(state==='menu'||state==='paused') startGame(); else if(state==='dead') resetGame(); });
+restartBtn.addEventListener('click', resetGame);
+muteBtn.addEventListener('click', ()=>{ muted=!muted; muteBtn.textContent=muted?'Unmute':'Mute'; });
+
+// Update / draw
+function update(dt){
+  if(state!=='playing') return;
+  speed += CONFIG.speedAccel * dt;
+  const intervalRange = Math.max(CONFIG.spawnIntervalMin, CONFIG.spawnInterval-(speed-CONFIG.baseSpeed)*0.0015);
+  spawnTimer -= dt; if(spawnTimer<=0){ spawnObstacle(); spawnTimer = intervalRange*(0.85+Math.random()*0.3); }
+
+  distance += speed*dt; scoreEl.textContent = Math.floor(distance/10);
+  player.vy += CONFIG.gravity*dt; player.y += player.vy*dt;
+  const groundY = canvas.height/DPR - CONFIG.groundHeight - player.h;
+  if(player.y>groundY){ player.y=groundY; player.vy=0; } 
+  if(player.y<CONFIG.ceilingY){ player.y=CONFIG.ceilingY; player.vy=0; }
+
+  for(let i=obstacles.length-1;i>=0;i--){
+    const ob=obstacles[i]; ob.x -= speed*dt;
+    if(ob.type==='move'){ ob.phase += dt*ob.speed; ob.y = ob.baseY + Math.sin(ob.phase)*32; ob.y=Math.max(CONFIG.ceilingY+10,Math.min(ob.y,groundY-ob.h-10)); }
+    if(ob.x+ob.w<-100) obstacles.splice(i,1);
+    if(rectsOverlap(player,ob)) endGame();
+  }
+
+  const logicalW = canvas.width/DPR;
+  layers.forEach(layer=>{
+    layer.offset -= speed*dt*layer.speedFactor;
+    if(layer.offset < -logicalW-400) layer.offset += logicalW+400;
+  });
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.save(); ctx.scale(DPR,DPR);
+  const logicalW = canvas.width/DPR, logicalH = canvas.height/DPR;
+  const g = ctx.createLinearGradient(0,0,0,logicalH); g.addColorStop(0,'#0b0b0c'); g.addColorStop(1,'#000'); ctx.fillStyle=g; ctx.fillRect(0,0,logicalW,logicalH);
+
+  layers.forEach(layer=>{
+    ctx.fillStyle = layer.color;
+    layer.buildings.forEach(b=>{
+      const drawX = b.x + layer.offset;
+      ctx.fillRect(drawX, logicalH - b.h, b.w, b.h);
+    });
+  });
+
+  ctx.fillStyle='#0b0b0d'; ctx.fillRect(0, logicalH - CONFIG.groundHeight, logicalW, CONFIG.groundHeight);
+  ctx.fillStyle='#121212'; ctx.fillRect(0,0,logicalW,CONFIG.ceilingY);
+
+  obstacles.forEach(ob=>{
+    if(ob.type==='spike'){ ctx.fillStyle='#c43b4f'; ctx.beginPath(); ctx.moveTo(ob.x,ob.y+ob.h); ctx.lineTo(ob.x+ob.w/2,ob.y); ctx.lineTo(ob.x+ob.w,ob.y+ob.h); ctx.closePath(); ctx.fill(); }
+    else { ctx.fillStyle = ob.type==='move'?'#b3384a':'#ef4444'; ctx.fillRect(ob.x,ob.y,ob.w,ob.h); }
+  });
+
+  ctx.fillStyle=player.color; ctx.fillRect(player.x,player.y,player.w,player.h);
+  ctx.fillStyle='rgba(255,255,255,0.06)'; ctx.fillRect(player.x+6,player.y+6,player.w-12,player.h-12);
+  ctx.restore();
+}
+
+function loop(now){
+  const dt = Math.min(0.04,(now-lastTime)/1000); lastTime=now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+
+resetGame();
+requestAnimationFrame(t=>{ lastTime=t; requestAnimationFrame(loop); });
+window.addEventListener('resize', ()=>{ resizeCanvas(); buildParallax(); player.y = canvas.height/DPR - CONFIG.groundHeight - player.h; });
+</script>
+<a style="color: aqua;" href="index.html">Back to Resume</a>
+</body>
+</html>
